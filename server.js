@@ -17,9 +17,13 @@ const SESSION_SECRET = process.env.SESSION_SECRET;
 
 const FRONTEND_ORIGIN = "https://onlynuggettt.github.io";
 
-// =========================
-// CORS
-// =========================
+// =====================================================
+// BASIC SETUP
+// =====================================================
+
+app.set("trust proxy", 1);
+
+app.use(express.json());
 
 app.use(
     cors({
@@ -28,13 +32,9 @@ app.use(
     })
 );
 
-app.use(express.json());
-
-// =========================
+// =====================================================
 // SESSION
-// =========================
-
-app.set("trust proxy", 1);
+// =====================================================
 
 app.use(
     session({
@@ -51,103 +51,102 @@ app.use(
     })
 );
 
-// =========================
+// =====================================================
+// ONE-TIME LOGIN TICKETS
+// =====================================================
+
+const loginTickets = new Map();
+
+// Ticket expiration: 60 seconds
+const TICKET_LIFETIME = 60 * 1000;
+
+// Clean expired tickets every minute
+setInterval(() => {
+    const now = Date.now();
+
+    for (const [ticket, data] of loginTickets.entries()) {
+        if (data.expiresAt < now) {
+            loginTickets.delete(ticket);
+        }
+    }
+}, 60 * 1000);
+
+// =====================================================
 // HOME
-// =========================
+// =====================================================
 
 app.get("/", (req, res) => {
     res.send(`
         <h1>RemoteEvent Backend</h1>
         <p>Backend is online.</p>
-        <p>
-            <a href="/login">Test Roblox Login</a>
-        </p>
+        <a href="/login">Test Roblox Login</a>
     `);
 });
 
-// =========================
+// =====================================================
 // ROBLOX LOGIN
-// =========================
+// =====================================================
 
 app.get("/login", (req, res) => {
-    try {
-        const state = crypto
-            .randomBytes(32)
-            .toString("hex");
+    const state = crypto.randomBytes(32).toString("hex");
 
-        const codeVerifier = crypto
-            .randomBytes(32)
-            .toString("base64url");
+    const codeVerifier = crypto.randomBytes(32).toString("base64url");
 
-        const codeChallenge = crypto
-            .createHash("sha256")
-            .update(codeVerifier)
-            .digest("base64url");
+    const codeChallenge = crypto
+        .createHash("sha256")
+        .update(codeVerifier)
+        .digest("base64url");
 
-        // Save OAuth information in session
-        req.session.oauthState = state;
-        req.session.codeVerifier = codeVerifier;
+    req.session.oauthState = state;
+    req.session.codeVerifier = codeVerifier;
 
-        const params = new URLSearchParams({
-            client_id: ROBLOX_CLIENT_ID,
-            redirect_uri: REDIRECT_URI,
-            response_type: "code",
-            scope: "openid profile",
-            state: state,
-            code_challenge: codeChallenge,
-            code_challenge_method: "S256"
-        });
+    const params = new URLSearchParams({
+        client_id: ROBLOX_CLIENT_ID,
+        redirect_uri: REDIRECT_URI,
+        response_type: "code",
+        scope: "openid profile",
+        state: state,
+        code_challenge: codeChallenge,
+        code_challenge_method: "S256"
+    });
 
-        res.redirect(
-            `https://apis.roblox.com/oauth/v1/authorize?${params.toString()}`
-        );
+    const authUrl =
+        "https://apis.roblox.com/oauth/v1/authorize?" +
+        params.toString();
 
-    } catch (error) {
-        console.error("Login error:", error);
-        res.status(500).send("Failed to start Roblox login.");
-    }
+    res.redirect(authUrl);
 });
 
-// =========================
+// =====================================================
 // ROBLOX CALLBACK
-// =========================
+// =====================================================
 
 app.get("/callback", async (req, res) => {
     try {
         const { code, state } = req.query;
 
-        console.log("OAuth callback received.");
-        console.log("State received:", state);
-        console.log("Session state:", req.session.oauthState);
-
         if (!code) {
-            return res
-                .status(400)
-                .send("Missing authorization code.");
+            return res.status(400).send("Missing authorization code.");
+        }
+
+        if (!state) {
+            return res.status(400).send("Missing OAuth state.");
         }
 
         // Check OAuth state
-        if (
-            !state ||
-            state !== req.session.oauthState
-        ) {
-            return res
-                .status(400)
-                .send("Invalid OAuth state.");
+        if (state !== req.session.oauthState) {
+            return res.status(400).send("Invalid OAuth state.");
         }
 
-        const codeVerifier =
-            req.session.codeVerifier;
+        const codeVerifier = req.session.codeVerifier;
 
         if (!codeVerifier) {
-            return res
-                .status(400)
-                .send("Missing PKCE verifier.");
+            return res.status(400).send("Missing PKCE verifier.");
         }
 
-        // =========================
+        // =================================================
         // EXCHANGE CODE FOR TOKEN
-        // =========================
+        // =================================================
 
         const tokenResponse = await fetch(
             "https://apis.roblox.com/oauth/v1/token",
@@ -160,213 +159,195 @@ app.get("/callback", async (req, res) => {
                 },
 
                 body: new URLSearchParams({
-                    client_id:
-                        ROBLOX_CLIENT_ID,
-
-                    client_secret:
-                        ROBLOX_CLIENT_SECRET,
-
-                    grant_type:
-                        "authorization_code",
-
-                    code:
-                        code,
-
-                    code_verifier:
-                        codeVerifier,
-
-                    redirect_uri:
-                        REDIRECT_URI
+                    client_id: ROBLOX_CLIENT_ID,
+                    client_secret: ROBLOX_CLIENT_SECRET,
+                    grant_type: "authorization_code",
+                    code: code,
+                    redirect_uri: REDIRECT_URI,
+                    code_verifier: codeVerifier
                 })
             }
         );
 
-        const tokenData =
-            await tokenResponse.json();
+        const tokenData = await tokenResponse.json();
 
         if (!tokenResponse.ok) {
+            console.error("Roblox token error:", tokenData);
 
-            console.error(
-                "Roblox token error:",
-                tokenData
+            return res.status(400).send(
+                "Failed to get Roblox access token."
             );
-
-            return res
-                .status(500)
-                .send(
-                    "Failed to get Roblox access token."
-                );
         }
 
-        const accessToken =
-            tokenData.access_token;
+        const accessToken = tokenData.access_token;
 
-        if (!accessToken) {
-            return res
-                .status(500)
-                .send(
-                    "Roblox did not return an access token."
-                );
-        }
-
-        // =========================
+        // =================================================
         // GET ROBLOX USER
-        // =========================
+        // =================================================
 
         const userResponse = await fetch(
             "https://apis.roblox.com/oauth/v1/userinfo",
             {
                 headers: {
-                    Authorization:
-                        `Bearer ${accessToken}`
+                    Authorization: `Bearer ${accessToken}`
                 }
             }
         );
 
-        const userData =
-            await userResponse.json();
+        const userData = await userResponse.json();
 
         if (!userResponse.ok) {
+            console.error("Roblox user info error:", userData);
 
-            console.error(
-                "Roblox userinfo error:",
-                userData
+            return res.status(400).send(
+                "Failed to get Roblox user information."
             );
-
-            return res
-                .status(500)
-                .send(
-                    "Failed to get Roblox user information."
-                );
         }
 
-        console.log(
-            "Roblox user:",
-            userData
-        );
+        console.log("Roblox user logged in:", userData);
 
-        // =========================
-        // SAVE USER SESSION
-        // =========================
+        // =================================================
+        // CREATE USER OBJECT
+        // =================================================
 
-        req.session.user = {
-            id: userData.sub,
-
-            username:
-                userData.preferred_username ||
-                userData.name,
-
+        const user = {
+            id: String(userData.sub),
+            username: userData.preferred_username || "",
             displayName:
-                userData.name,
-
-            picture:
-                userData.picture || null,
-
+                userData.name ||
+                userData.preferred_username ||
+                "",
+            picture: userData.picture || "",
             profile:
-                userData.profile || null
+                `https://www.roblox.com/users/${userData.sub}/profile`
         };
 
-        // Remove temporary OAuth data
+        // =================================================
+        // CREATE ONE-TIME TICKET
+        // =================================================
+
+        const ticket = crypto.randomBytes(32).toString("hex");
+
+        loginTickets.set(ticket, {
+            user: user,
+            expiresAt: Date.now() + TICKET_LIFETIME
+        });
+
+        // Remove temporary OAuth session data
         delete req.session.oauthState;
         delete req.session.codeVerifier;
 
-        // =========================
-        // SAVE SESSION
-        // =========================
+        // =================================================
+        // REDIRECT TO WEBSITE
+        // =================================================
 
-        req.session.save((error) => {
+        res.redirect(
+            `${FRONTEND_URL}?login=success&ticket=${encodeURIComponent(ticket)}`
+        );
 
-            if (error) {
+    } catch (error) {
+        console.error("OAuth callback error:", error);
 
-                console.error(
-                    "Session save error:",
-                    error
-                );
+        res.status(500).send(
+            "An error occurred while logging in with Roblox."
+        );
+    }
+});
 
-                return res
-                    .status(500)
-                    .send(
-                        "Failed to save login session."
-                    );
+// =====================================================
+// EXCHANGE LOGIN TICKET
+// =====================================================
+
+app.get("/api/exchange", (req, res) => {
+    try {
+        const ticket = req.query.ticket;
+
+        if (!ticket) {
+            return res.status(400).json({
+                error: "Missing login ticket."
+            });
+        }
+
+        const ticketData = loginTickets.get(ticket);
+
+        if (!ticketData) {
+            return res.status(400).json({
+                error: "Invalid or expired login ticket."
+            });
+        }
+
+        // Check expiration
+        if (ticketData.expiresAt < Date.now()) {
+            loginTickets.delete(ticket);
+
+            return res.status(400).json({
+                error: "Login ticket expired."
+            });
+        }
+
+        // IMPORTANT:
+        // Delete immediately so the ticket can only be used once.
+        loginTickets.delete(ticket);
+
+        // Save the user into the current session too
+        req.session.user = ticketData.user;
+
+        req.session.save((err) => {
+            if (err) {
+                console.error("Session save error:", err);
             }
+        });
 
-            console.log(
-                "Login successful:",
-                req.session.user
-            );
-
-            // Redirect to GitHub Pages
-            res.redirect(
-                FRONTEND_URL +
-                "?login=success"
-            );
+        return res.json({
+            loggedIn: true,
+            user: ticketData.user
         });
 
     } catch (error) {
+        console.error("Ticket exchange error:", error);
 
-        console.error(
-            "Callback error:",
-            error
-        );
-
-        res
-            .status(500)
-            .send(
-                "Something went wrong during Roblox login."
-            );
+        res.status(500).json({
+            error: "Failed to exchange login ticket."
+        });
     }
 });
 
-// =========================
-// CURRENT USER
-// =========================
+// =====================================================
+// CHECK SESSION
+// =====================================================
 
 app.get("/api/me", (req, res) => {
-
-    if (!req.session.user) {
-
+    if (req.session.user) {
         return res.json({
-            loggedIn: false
+            loggedIn: true,
+            user: req.session.user
         });
     }
 
-    res.json({
-        loggedIn: true,
-
-        user: req.session.user
+    return res.json({
+        loggedIn: false
     });
 });
 
-// =========================
+// =====================================================
 // LOGOUT
-// =========================
+// =====================================================
 
 app.get("/logout", (req, res) => {
+    req.session.destroy((err) => {
+        if (err) {
+            console.error("Logout error:", err);
 
-    req.session.destroy((error) => {
-
-        if (error) {
-
-            console.error(
-                "Logout error:",
-                error
-            );
-
-            return res
-                .status(500)
-                .json({
-                    success: false
-                });
+            return res.status(500).json({
+                error: "Failed to logout."
+            });
         }
 
-        res.clearCookie(
-            "connect.sid",
-            {
-                httpOnly: true,
-                secure: true,
-                sameSite: "none"
-            }
-        );
+        res.clearCookie("connect.sid", {
+            httpOnly: true,
+            secure: true,
+            sameSite: "none"
+        });
 
         res.json({
             success: true
@@ -374,14 +355,10 @@ app.get("/logout", (req, res) => {
     });
 });
 
-// =========================
+// =====================================================
 // START SERVER
-// =========================
+// =====================================================
 
 app.listen(PORT, () => {
-
-    console.log(
-        `RemoteEvent Backend running on port ${PORT}`
-    );
-
+    console.log(`RemoteEvent Backend running on port ${PORT}`);
 });
